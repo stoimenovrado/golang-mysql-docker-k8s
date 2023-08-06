@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golang-db-deployment
+  namespace: golang-app
+  labels:
+    app: golang-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: golang-db
+  template:
+    metadata:
+      labels:
+        app: golang-db
+    spec:
+      volumes:
+      - name: new-volume
+        emptyDir: {}
+      initContainers:
+      - name: password-get
+        image: busybox:latest
+        command: ["wget", "https://raw.githubusercontent.com/docker/awesome-compose/master/nginx-golang-mysql/db/password.txt", "-O", "/config/password.txt"]
+        volumeMounts:
+          - name: new-volume
+            mountPath: /config
+      containers:
+      - name: golang-db
+        image: prvtrgstr.azurecr.io/nginx-golang-mysql/db-golang:141
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 200m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        ports:
+          - containerPort: 3306
+        volumeMounts:
+        - name: new-volume
+          mountPath: /app/db
+      imagePullSecrets:
+      - name: acr-secret-2
+      

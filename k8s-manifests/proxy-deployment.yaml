@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golang-proxy-deployment
+  namespace: golang-app
+  labels:
+    app: golang-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: golang-proxy
+  template:
+    metadata:
+      labels:
+        app: golang-proxy
+    spec:
+      containers:
+      - name: golang-proxy
+        image: prvtrgstr.azurecr.io/nginx-golang-mysql/proxy-golang:141
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "150m"
+        ports:
+          - containerPort: 80
