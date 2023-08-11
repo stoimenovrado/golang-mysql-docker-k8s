@@ -1,0 +1,155 @@
+variables:
+
+  dockerRegistryServiceConnection: 'connection.id.here'
+  containerRegistry: 'registry.azurecr.io'
+  vaultName: 'key.vault.name'
+  secretName: 'registry.pass.here'
+  secretNameGit: 'secret.name.here'
+  dockerUser: 'docker.user.here'
+  repoUserName: 'name.here'
+  repoEmail: 'email.here@mail.com'
+
+  dockerfileDB: 'nginx-golang-mysql/Dockerfile-db'
+  dockerfileBackend: 'nginx-golang-mysql/Dockerfile-go'
+  dockerfileProxy: 'nginx-golang-mysql/Dockerfile-proxy'
+  dbImageName: 'db-golang'
+  backendImageName: 'backend-golang'
+  proxyImageName: 'proxy-golang'
+  networkName: 'golang'
+  dbContName: 'db'
+  backendContName: 'backend'
+  proxyContName: 'proxy'
+  imageRepositoryDB: 'registry.azurecr.io/nginx-golang-mysql/db-golang'
+  imageRepositoryBackend: 'registry.azurecr.io/nginx-golang-mysql/backend-golang'
+  imageRepositoryProxy: 'registry.azurecr.io/nginx-golang-mysql/proxy-golang'
+
+  tag: '$(Build.BuildId)'
+
+  resourceGroup: 'Custom-project-k8s'
+  clusterName: 'k8s-test-aks1'
+
+  vmImageName: 'ubuntu-latest'
+
+stages:
+- stage: Build_Test_Push_Deploy
+  displayName: Build, Test and Push to registry stage
+  jobs:
+  - job: Build_Test_Push
+    displayName: Build, Test and Push to registry
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: SonarQubePrepare@5
+      inputs:
+        SonarQube: 'sonarqube-connection'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'custom-project_custom-project_AYnZYTK4fwgeqhj2RTY0'
+        cliProjectName: 'nginx-golang-mysql'
+        cliSources: 'nginx-golang-mysql/'
+    - task: SonarQubeAnalyze@5
+      inputs:
+        jdkversion: 'JAVA_HOME_11_X64'
+    - task: SonarQubePublish@5
+      inputs:
+        pollingTimeoutSec: '300'
+
+    - script: |
+        docker image build -t $(dbImageName):$(tag) -f $(dockerfileDB) .
+        docker image build -t $(backendImageName):$(tag) -f $(dockerfileBackend) .
+        docker image build -t $(proxyImageName):$(tag) -f $(dockerfileProxy) .
+      displayName: Docker Build
+
+    - script: |
+        docker network create $(networkName)
+        docker container run -d --network $(networkName) --name $(dbContName) -p 3306:3306 $(dbImageName):$(tag)
+        docker container run -d --network $(networkName) --name $(backendContName) -p 8000:8000 $(backendImageName):$(tag)
+        docker container run -d --network $(networkName) --name $(proxyContName) -p 80:80 $(proxyImageName):$(tag)
+      displayName: Docker Containers Run From local images
+
+    - script: |
+        echo 'Test #1 - reachability'
+        sleep 10
+        curl http://localhost:80 | grep 'Blog post #4'
+        echo 'Test sucessfull, proceeding...'
+      displayName: Reachability Test 1
+
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'prvtrgstr'
+        command: 'login'
+
+    - script: |
+        docker image tag $(dbImageName):$(tag) $(imageRepositoryDB):$(tag)
+        docker push $(imageRepositoryDB):$(tag)
+        docker image tag $(backendImageName):$(tag) $(imageRepositoryBackend):$(tag)
+        docker push $(imageRepositoryBackend):$(tag)
+        docker image tag $(proxyImageName):$(tag) $(imageRepositoryProxy):$(tag)
+        docker push $(imageRepositoryProxy):$(tag)
+      displayName: Docker Containers Push
+
+    - script: |
+        docker container rm -f $(docker ps -q)
+        docker image prune -af
+        docker volume prune -f
+        docker network prune -f
+      displayName: Remove all docker resources
+
+    - script: |
+        docker network create $(networkName)
+        docker container run -d --network $(networkName) --name $(dbContName) -p 3306:3306 $(imageRepositoryDB):$(tag)
+        docker container run -d --network $(networkName) --name $(backendContName) -p 8000:8000 $(imageRepositoryBackend):$(tag)
+        docker container run -d --network $(networkName) --name $(proxyContName) -p 80:80 $(imageRepositoryProxy):$(tag)
+      displayName: Docker Containers Run from Registry
+
+    - script: |
+        echo 'Test #2 - reachability'
+        sleep 10
+        curl http://localhost:80 | grep 'Blog post #4'
+        echo 'Test sucessfull, proceeding...'
+      displayName: Reachability Test 2
+
+    - script: |
+        docker container rm -f $(docker ps -q)
+        docker system prune -f
+        docker image prune -af
+        docker volume prune -f
+        docker network prune -f
+      displayName: Remove all docker resources
+
+    - script: |
+        az login
+        secretGitPass=$(az keyvault secret show --name $(secretNameGit) --vault-name $(vaultName) --query value --output tsv)
+        sudo git remote remove origin
+        sudo rm -rf .git
+        sudo git clone https://$secretGitPass@dev.azure.com/radoslavstoimenov0429/custom-project/_git/custom-project
+        cd custom-project/
+        sudo git config --global user.email "$(repoEmail)"
+        sudo git config --global user.name "$(repoUserName)"
+      displayName: Configure and pull Git repo
+
+    - script: |
+        sudo sed -i "s|image: .*|image: $(imageRepositoryBackend):$(tag)|" custom-project/nginx-golang-mysql/k8s-manifests/backend-deployment.yaml
+        sudo sed -i "s|image: .*|image: $(imageRepositoryDB):$(tag)|" custom-project/nginx-golang-mysql/k8s-manifests/db-deployment.yaml
+        sudo sed -i "s|image: .*|image: $(imageRepositoryProxy):$(tag)|" custom-project/nginx-golang-mysql/k8s-manifests/proxy-deployment.yaml
+      displayName: Update the k8s manifests with the new images
+
+    - script: |
+        cd custom-project/
+        sudo git add .
+        sudo git commit -m "Update k8s manifests with new image version"
+        sudo git push origin master
+      displayName: Commit and push to the Repo
+
+  - job: Deploy_to_k8s
+    dependsOn: Build_Test_Push
+    steps:
+      - task: KubernetesManifest@1
+        inputs:
+          action: 'deploy'
+          connectionType: 'azureResourceManager'
+          azureSubscriptionConnection: 'Visual Studio Subscription RadoslvSt(14ef8d49-a786-46b6-8578-c2f9cfc5efd6)'
+          azureResourceGroup: 'Custom-project-k8s'
+          kubernetesCluster: 'k8s-test-aks1'
+          namespace: 'argocd'
+          manifests: 'nginx-golang-mysql/argocd.yaml'
