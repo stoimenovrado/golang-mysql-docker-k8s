@@ -1,6 +1,6 @@
 FROM nginx:latest
 
-COPY ./proxy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY ./nginx-golang-mysql/proxy/nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 
