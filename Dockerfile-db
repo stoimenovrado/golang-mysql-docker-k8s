@@ -1,8 +1,8 @@
 FROM mariadb:10-focal
 
+ADD ./nginx-golang-mysql/db/password.txt /app/db/password.txt
+
 ENV MYSQL_DATABASE=example
 ENV MYSQL_ROOT_PASSWORD_FILE=/app/db/password.txt
-
-RUN mysqladmin ping -h 127.0.0.1 --password="$(cat /app/db/password.txt)"
 
 EXPOSE 3306
