@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golang-backend-deployment
+  namespace: golang-app
+  labels:
+    app: golang-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: golang-backend
+  template:
+    metadata:
+      labels:
+        app: golang-backend
+    spec:
+      containers:
+      - name: golang-backend
+        image: prvtrgstr.azurecr.io/nginx-golang-mysql/backend-golang:408
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        ports:
+          - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: "/"
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 20
+        livenessProbe:
+          exec:
+            command: ['echo', '* liveness probe!']
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 20
+      terminationGracePeriodSeconds: 120
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1

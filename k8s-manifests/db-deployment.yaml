@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golang-db-deployment
+  namespace: golang-app
+  labels:
+    app: golang-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: golang-db
+  template:
+    metadata:
+      labels:
+        app: golang-db
+    spec:
+      containers:
+      - name: golang-db
+        image: prvtrgstr.azurecr.io/nginx-golang-mysql/db-golang:408
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 100m
+          limits:
+            memory: 256Mi
+            cpu: 200m
+        ports:
+          - containerPort: 3306
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1

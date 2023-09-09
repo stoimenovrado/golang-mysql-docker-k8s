@@ -1,0 +1,315 @@
+variables:
+
+  dockerRegistryServiceConnection: '88dab2fc-d0ab-4195-8f7d-95b4f9dce1e2'
+  azureSubs: 'Visual Studio Subscription RadoslvSt(14ef8d49-a786-46b6-8578-c2f9cfc5efd6)'
+  containerRegistry: 'prvtrgstr.azurecr.io'
+  vaultName: 'kvlt-radslv'
+  secretName: 'registry-pass1'
+  secretNameGit: 'custom-project-repo'
+  dockerUser: 'custom-project'
+  repoUserName: 'radoslav.stoimenov'
+  repoEmail: 'radoslav.stoimenov@accedia.com'
+
+  dockerfileDB: 'nginx-golang-mysql/Dockerfile-db'
+  dockerfileBackend: 'nginx-golang-mysql/Dockerfile-go'
+  dockerfileProxy: 'nginx-golang-mysql/Dockerfile-proxy'
+  dbImageName: 'db-golang'
+  backendImageName: 'backend-golang'
+  proxyImageName: 'proxy-golang'
+  networkName: 'golang'
+  dbContName: 'db'
+  backendContName: 'backend'
+  proxyContName: 'proxy'
+  imageRepositoryDB: 'prvtrgstr.azurecr.io/nginx-golang-mysql/db-golang'
+  imageRepositoryBackend: 'prvtrgstr.azurecr.io/nginx-golang-mysql/backend-golang'
+  imageRepositoryProxy: 'prvtrgstr.azurecr.io/nginx-golang-mysql/proxy-golang'
+
+  tag: '$(Build.BuildId)'
+
+  resourceGroupDev: 'Custom-project-k8s'
+  clusterNameDev: 'k8s-test-aks1'
+
+  resourceGroupProd: 'Dev-lb-aks'
+  clusterNameProd: 'k8s-monitoring'
+
+  projectURL: "@dev.azure.com/radoslavstoimenov0429/custom-project/_git/custom-project"
+
+  vmImageName: 'ubuntu-latest'
+
+stages:
+- stage: Build_Test_Push_Deploy
+  displayName: Build, Test and Push to registry stage
+  jobs:
+  - job: Build_Test_Push
+    displayName: Build, Test and Push to registry
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+
+    - task: AzureKeyVault@2
+      inputs:
+        azureSubscription: 'ACKV'
+        KeyVaultName: 'kvlt-radslv'
+        SecretsFilter: '*'
+        RunAsPreJob: true
+
+    - task: SonarQubePrepare@5
+      inputs:
+        SonarQube: 'sonarqube-connection'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'custom-project_custom-project_AYnZYTK4fwgeqhj2RTY0'
+        cliProjectName: 'nginx-golang-mysql'
+        cliSources: 'nginx-golang-mysql/'
+      displayName: 'SonarQube Prepare'
+
+    - task: SonarQubeAnalyze@5
+      inputs:
+        jdkversion: 'JAVA_HOME_11_X64'
+      displayName: 'SonarQube Analyze'
+    - task: SonarQubePublish@5
+      inputs:
+        pollingTimeoutSec: '300'
+      displayName: 'SonarQube Publish'
+
+    - task: WhiteSource@21
+      inputs:
+        cwd: 'nginx-golang-mysql/'
+        projectName: 'nginx-golang-mysql'
+
+    - script: |
+        docker image build -t $(dbImageName):$(tag) -f $(dockerfileDB) .
+        docker image build -t $(backendImageName):$(tag) -f $(dockerfileBackend) .
+        docker image build -t $(proxyImageName):$(tag) -f $(dockerfileProxy) .
+      displayName: Docker Build
+
+    - task: trivy@1
+      inputs:
+        version: 'latest'
+        docker: false
+        image: "$(dbImageName):$(tag)"
+        exitCode: 0
+        ignoreUnfixed: true
+      displayName: DB Image Scan
+
+    - task: trivy@1
+      inputs:
+        version: 'latest'
+        docker: false
+        image: "$(backendImageName):$(tag)"
+        exitCode: 0
+        ignoreUnfixed: true
+      displayName: Backend Image Scan
+
+    - task: trivy@1
+      inputs:
+        version: 'latest'
+        docker: false
+        image: "$(proxyImageName):$(tag)"
+        exitCode: 0
+        ignoreUnfixed: true
+      displayName: Proxy Image Scan
+
+    - script: |
+        docker network create $(networkName)
+        docker container run -d --network $(networkName) --name $(dbContName) -p 3306:3306 $(dbImageName):$(tag)
+        docker container run -d --network $(networkName) --name $(backendContName) -p 8000:8000 $(backendImageName):$(tag)
+        docker container run -d --network $(networkName) --name $(proxyContName) -p 80:80 $(proxyImageName):$(tag)
+      displayName: Docker Containers Run From local images
+
+    - script: |
+        max_attempts=10
+        attempt=1
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt: Testing App reachability ...";
+          if [ $(curl -s -o /dev/null -w "%{http_code}" http://localhost:80) == "200" ]; then
+            echo "... connection test succeeded. App is running.";
+            break;
+          else
+            echo "... connection test failed. Sleep for 5s and retry.";
+            sleep 5;
+          fi
+          attempt=$((attempt + 1))
+        done
+        if [ $attempt -gt $max_attempts ]; then
+          echo "Maximum retry attempts reached. Unable to establish connection."
+        fi
+      displayName: Reachability Test 1
+
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'prvtrgstr'
+        command: 'login'
+
+    - script: |
+        docker image tag $(dbImageName):$(tag) $(imageRepositoryDB):$(tag)
+        docker push $(imageRepositoryDB):$(tag)
+        docker image tag $(backendImageName):$(tag) $(imageRepositoryBackend):$(tag)
+        docker push $(imageRepositoryBackend):$(tag)
+        docker image tag $(proxyImageName):$(tag) $(imageRepositoryProxy):$(tag)
+        docker push $(imageRepositoryProxy):$(tag)
+      displayName: Docker Containers Push
+
+    - script: |
+        docker container rm -f $(docker ps -q)
+        docker image prune -af
+        docker volume prune -f
+        docker network prune -f
+      displayName: Remove all docker resources
+
+    - script: |
+        docker network create $(networkName)
+        docker container run -d --network $(networkName) --name $(dbContName) -p 3306:3306 $(imageRepositoryDB):$(tag)
+        docker container run -d --network $(networkName) --name $(backendContName) -p 8000:8000 $(imageRepositoryBackend):$(tag)
+        docker container run -d --network $(networkName) --name $(proxyContName) -p 80:80 $(imageRepositoryProxy):$(tag)
+      displayName: Docker Containers Run from Registry
+
+    - script: |
+        max_attempts=10
+        attempt=1
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt: Testing App reachability ...";
+          if [ $(curl -s -o /dev/null -w "%{http_code}" http://localhost:80) == "200" ]; then
+            echo "... connection test succeeded. App is running.";
+            break;
+          else
+            echo "... connection test failed. Sleep for 5s and retry.";
+            sleep 5;
+          fi
+          attempt=$((attempt + 1))
+        done
+        if [ $attempt -gt $max_attempts ]; then
+          echo "Maximum retry attempts reached. Unable to establish connection."
+        fi
+      displayName: Reachability Test 2
+
+    - script: |
+        docker container rm -f $(docker ps -q)
+        docker system prune -f
+        docker image prune -af
+        docker volume prune -f
+        docker network prune -f
+      displayName: Remove all docker resources
+
+    - script: |
+        sudo git remote remove origin
+        sudo rm -rf .git
+        sudo git clone https://$(custom-project-repo)@dev.azure.com/radoslavstoimenov0429/custom-project/_git/custom-project
+        cd custom-project/
+        sudo git config --global user.email "$(repoEmail)"
+        sudo git config --global user.name "$(repoUserName)"
+      displayName: Configure and pull Git repo
+
+    - script: |
+        sudo sed -i "s|image: .*|image: $(imageRepositoryBackend):$(tag)|" custom-project/nginx-golang-mysql/k8s-manifests/backend-deployment.yaml
+        sudo sed -i "s|image: .*|image: $(imageRepositoryDB):$(tag)|" custom-project/nginx-golang-mysql/k8s-manifests/db-deployment.yaml
+        sudo sed -i "s|image: .*|image: $(imageRepositoryProxy):$(tag)|" custom-project/nginx-golang-mysql/k8s-manifests/proxy-deployment.yaml
+      displayName: Update the k8s manifests with the new images
+
+    - script: |
+        cd custom-project/
+        sudo git add .
+        sudo git commit -m "Update k8s manifests with new image version"
+        sudo git push origin master
+      displayName: Commit and push to the Repo
+
+  - job: Deploy_to_k8s_dev
+    dependsOn: Build_Test_Push
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+      - task: AzureKeyVault@2
+        inputs:
+          azureSubscription: 'ACKV'
+          KeyVaultName: 'kvlt-radslv'
+          SecretsFilter: '*'
+          RunAsPreJob: true
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: $(azureSubs)
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            sed -i "s|replacement-url-here|https:\/\/\$(for-argo-cd)\$(projectURL)|" nginx-golang-mysql/argocd.yaml
+            az aks get-credentials --resource-group $(resourceGroupDev) --overwrite-existing --name $(clusterNameDev)
+            kubectl delete -f nginx-golang-mysql/argocd.yaml -n argocd || true
+            kubectl delete ns golang-app || true
+            kubectl apply -f nginx-golang-mysql/argocd.yaml -n argocd
+        displayName: Force sync the app
+
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: $(azureSubs)
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            az aks get-credentials --resource-group $(resourceGroupDev) --overwrite-existing --name $(clusterNameDev)
+            POD_NAME=$(kubectl get pods -n golang-app -l app=golang-proxy -o jsonpath='{.items[0].metadata.name}')
+            max_attempts=20
+            attempt=1
+            while [ $attempt -le $max_attempts ]; do
+              echo "Attempt $attempt: Testing connection to the App ...";
+              if kubectl exec -n golang-app $POD_NAME -- sh -c 'curl --write-out "%{http_code}" --silent --output /dev/null http://localhost:80 | grep -q 200'; then
+                echo "... connection test succeeded. App is running.";
+                break;
+              else
+                echo "... connection test failed. Sleep for 5s and retry.";
+                sleep 5;
+              fi
+              attempt=$((attempt + 1))
+            done
+            if [ $attempt -gt $max_attempts ]; then
+              echo "Maximum retry attempts reached. Unable to establish connection."
+            fi
+        displayName: Test if the app is accessible
+
+  # - job: Deploy_to_k8s_Prod
+  #   dependsOn: Deploy_to_k8s_dev
+  #   pool:
+  #     vmImage: $(vmImageName)
+  #   steps:
+
+  #     - task: AzureKeyVault@2
+  #       inputs:
+  #         azureSubscription: 'ACKV'
+  #         KeyVaultName: 'kvlt-radslv'
+  #         SecretsFilter: '*'
+  #         RunAsPreJob: true
+  #     - task: AzureCLI@2
+  #       inputs:
+  #         azureSubscription: $(azureSubs)
+  #         scriptType: 'bash'
+  #         scriptLocation: 'inlineScript'
+  #         inlineScript: |
+  #           sed -i "s|replacement-url-here|https:\/\/\$(for-argo-cd)\$(projectURL)|" nginx-golang-mysql/argocd.yaml
+  #           az aks get-credentials --resource-group $(resourceGroupProd) --overwrite-existing --name $(clusterNameProd)
+  #           kubectl delete -f nginx-golang-mysql/argocd.yaml -n argocd || true
+  #           kubectl delete ns golang-app || true
+  #           kubectl apply -f nginx-golang-mysql/argocd.yaml -n argocd
+  #       displayName: Force sync the app
+
+  #     - task: AzureCLI@2
+  #       inputs:
+  #         azureSubscription: $(azureSubs)
+  #         scriptType: 'bash'
+  #         scriptLocation: 'inlineScript'
+  #         inlineScript: |
+  #           az aks get-credentials --resource-group $(resourceGroupProd) --overwrite-existing --name $(clusterNameProd)
+  #           POD_NAME=$(kubectl get pods -n golang-app -l app=golang-proxy -o jsonpath='{.items[0].metadata.name}')
+  #           max_attempts=20
+  #           attempt=1
+  #           while [ $attempt -le $max_attempts ]; do
+  #             echo "Attempt $attempt: Testing connection to the App ...";
+  #             if kubectl exec -n golang-app $POD_NAME -- sh -c 'curl --write-out "%{http_code}" --silent --output /dev/null http://localhost:80 | grep -q 200'; then
+  #               echo "... connection test succeeded. App is running.";
+  #               break;
+  #             else
+  #               echo "... connection test failed. Sleep for 5s and retry.";
+  #               sleep 5;
+  #             fi
+  #             attempt=$((attempt + 1))
+  #           done
+  #           if [ $attempt -gt $max_attempts ]; then
+  #             echo "Maximum retry attempts reached. Unable to establish connection."
+  #           fi
+  #       displayName: Test if the app is accessible

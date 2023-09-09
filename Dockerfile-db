@@ -1,0 +1,8 @@
+FROM mariadb:10.6-focal
+
+ADD ./nginx-golang-mysql/db/password.txt /app/db/password.txt
+
+ENV MYSQL_DATABASE=example
+ENV MYSQL_ROOT_PASSWORD_FILE=/app/db/password.txt
+
+EXPOSE 3306
